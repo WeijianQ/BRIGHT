@@ -19,6 +19,8 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 # from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
 from torchmetrics.functional.pairwise import pairwise_cosine_similarity
+from tqdm import tqdm  
+import pandas as pd
 
 def cut_text(text,tokenizer,threshold):
     text_ids = tokenizer(text)['input_ids']
@@ -112,7 +114,7 @@ def get_scores(query_ids,doc_ids,scores,excluded_ids):
     assert len(scores)==len(query_ids),f"{len(scores)}, {len(query_ids)}"
     assert len(scores[0])==len(doc_ids),f"{len(scores[0])}, {len(doc_ids)}"
     emb_scores = {}
-    for query_id,doc_scores in zip(query_ids,scores):
+    for query_id,doc_scores in tqdm(zip(query_ids,scores),desc="get scores", total=len(query_ids)):
         cur_scores = {}
         assert len(excluded_ids[query_id])==0 or (isinstance(excluded_ids[query_id][0], str) and isinstance(excluded_ids[query_id], list))
         for did,s in zip(doc_ids,doc_scores):
@@ -126,6 +128,34 @@ def get_scores(query_ids,doc_ids,scores,excluded_ids):
             emb_scores[str(query_id)][pair[0]] = pair[1]
     return emb_scores
 
+def get_scores_v2(query_ids, doc_ids, scores, excluded_ids):
+    """
+    Optimized version of get_scores using Pandas and NumPy for speed.
+    Args:
+        query_ids: list of query IDs (str or int)
+        doc_ids: list of document IDs (str or int)
+        scores: 2D array-like (num_queries x num_docs)
+        excluded_ids: dict mapping query_id to list of doc_ids to exclude
+    Returns:
+        emb_scores: dict mapping query_id to dict of top 1000 doc_id: score
+    """
+    # Ensure doc_ids and query_ids are strings for consistent indexing
+    doc_ids_str = [str(did) for did in doc_ids]
+    query_ids_str = [str(qid) for qid in query_ids]
+    # Convert scores to DataFrame for vectorized operations
+    df = pd.DataFrame(scores, index=query_ids_str, columns=doc_ids_str)
+    emb_scores = {}
+
+    for qid in tqdm(query_ids_str,desc="get scores v2", total=len(query_ids_str)):
+        exclude = set(excluded_ids[qid])
+        exclude.discard("N/A")
+        # Filter out excluded doc_ids
+        valid_doc_ids = [did for did in doc_ids_str if did not in exclude]
+        q_scores = df.loc[qid, valid_doc_ids]
+        # Get top 1000
+        top_scores = q_scores.nlargest(1000)
+        emb_scores[qid] = top_scores.to_dict()
+    return emb_scores
 
 @torch.no_grad()
 def retrieval_sf_qwen_e5(queries,query_ids,documents,doc_ids,task,model_id,instructions,cache_dir,excluded_ids,long_context,**kwargs):
@@ -296,14 +326,16 @@ def retrieval_grit(queries,query_ids,documents,doc_ids,task,instructions,model_i
         os.makedirs(os.path.join(cache_dir, 'doc_emb', model_id, task, f"long_{long_context}_{batch_size}"))
     cur_cache_file = os.path.join(cache_dir, 'doc_emb', model_id, task, f"long_{long_context}_{batch_size}", f'0.npy')
     ignore_cache = kwargs.pop('ignore_cache',False)
+    encode_batch_size = kwargs.get('encode_batch_size',128)
+    print("encode batch size:",encode_batch_size)
     if os.path.isfile(cur_cache_file):
         doc_emb = np.load(cur_cache_file, allow_pickle=True)
     elif ignore_cache:
-        doc_emb = model.encode(documents, instruction=doc_instruction, batch_size=1, max_length=doc_max_length)
+        doc_emb = model.encode(documents, instruction=doc_instruction, batch_size=encode_batch_size, max_length=doc_max_length)
     else:
-        doc_emb = model.encode(documents, instruction=doc_instruction, batch_size=1, max_length=doc_max_length)
+        doc_emb = model.encode(documents, instruction=doc_instruction, batch_size=encode_batch_size, max_length=doc_max_length)
         np.save(cur_cache_file, doc_emb)
-    query_emb = model.encode(queries, instruction=query_instruction, batch_size=1, max_length=query_max_length)
+    query_emb = model.encode(queries, instruction=query_instruction, batch_size=encode_batch_size, max_length=query_max_length)
     scores = pairwise_cosine_similarity(torch.from_numpy(query_emb), torch.from_numpy(doc_emb))
     scores = scores.tolist()
     assert len(scores) == len(query_ids), f"{len(scores)}, {len(query_ids)}"
