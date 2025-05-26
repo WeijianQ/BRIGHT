@@ -25,7 +25,11 @@ def main(args):
     task_dir = os.path.join(pre_cached_embedding_dir, task)
     os.makedirs(task_dir, exist_ok=True)
 
-    examples = load_dataset('xlangai/bright', 'examples', cache_dir='cache')[task]
+    if args.reasoning is not None:
+        split_name = f"{args.reasoning}_reason"
+    else:
+        split_name = "examples"
+    examples = load_dataset('xlangai/bright', split_name, cache_dir='cache')[task]
     queries = []
     query_ids = []
     excluded_ids = {}
@@ -70,12 +74,19 @@ def main(args):
         #     break
 
     results_v2 = calculate_retrieval_metrics(scores_v2, ground_truth)
+    if args.reasoning is not None:
+        print(f"Grit using {args.reasoning} rewrite queries on task {task}")
+    else:
+        print(f"Grit using original queries on task {task}")
     print(results_v2)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", type=str, choices=tasks)
+    parser.add_argument("--reasoning", type=str, default=None, choices=[
+        "Gemini-1.0", "claude-3-opus", "gpt4", "grit", "llama3-70b"
+    ])
     args = parser.parse_args()
     # import debugpy; debugpy.listen(5678); print("Waiting for debugger to attach...")
     # debugpy.wait_for_client()
